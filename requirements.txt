@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 psutil
-requests
 numpy
 scikit-learn
-tabpfn
+requests
+tabpfn-client
