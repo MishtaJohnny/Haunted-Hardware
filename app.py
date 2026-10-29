@@ -1,22 +1,37 @@
 import os, random, re, time, threading, json
 import numpy as np, psutil, requests
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
-if os.path.exists(".env"):  # secrets live in a gitignored .env file, never in the code
+# Load local .env secrets if present
+if os.path.exists(".env"):
     for _l in open(".env"):
         if "=" in _l and not _l.lstrip().startswith("#"):
             _k, _v = _l.strip().split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
-_tok = os.getenv("TABPFN_TOKEN") or os.getenv("TABPFN_API_KEY")
-if _tok:
-    os.environ["TABPFN_TOKEN"] = os.environ["TABPFN_API_KEY"] = _tok
+
+# Extract API Keys
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+TABPFN_TOKEN = os.getenv("TABPFN_TOKEN") or os.getenv("TABPFN_API_KEY")
+
+if TABPFN_TOKEN:
+    os.environ["TABPFN_TOKEN"] = os.environ["TABPFN_API_KEY"] = TABPFN_TOKEN
 os.environ.setdefault("TABPFN_NO_BROWSER", "1")
+
+# TabPFN Cloud Initialization
+USE_TABPFN_CLOUD = False
+if TABPFN_TOKEN:
+    try:
+        import tabpfn_client
+        tabpfn_client.set_access_token(TABPFN_TOKEN)
+        USE_TABPFN_CLOUD = True
+    except Exception as e:
+        print("tabpfn_client init error:", e)
 
 MODEL = os.getenv("HAUNT_MODEL", "gemma3:4b")
 DEMO = os.getenv("DEMO_MODE") == "1"
 OLLAMA_URL = os.getenv("OLLAMA_URL") or "http://localhost:11434"
-GEMMA_ON = (not DEMO) or bool(os.getenv("OLLAMA_URL"))
+GEMMA_ON = bool(GEMINI_API_KEY) or (not DEMO) or bool(os.getenv("OLLAMA_URL"))
 
 LABELS = ["Sanctified Core", "Abyssal Heap", "Clockwork Daemon", "Infernal Crucible"]
 FEATURES = ["cpu", "ram", "swap", "ram_delta", "top_proc_cpu"]
@@ -37,14 +52,15 @@ FALLBACK_RITUALS = {
 }
 
 _gemma = {}
+_last = {}  # latest reading, so ghost chat knows what dashboard sees
 rng = np.random.default_rng(7)
 
-# Strictly non-overlapping feature boundaries for all states
+# Non-overlapping feature boundaries
 RANGES = {
-    0: [(0, 45), (0, 75), (0, 25), (-10.0, 5.0), (0, 35)],     # Sanctified Core (Normal / Calm / Zero)
-    1: [(0, 65), (80, 100), (35, 100), (5.0, 35.0), (0, 50)],    # Abyssal Heap (High RAM leak)
-    2: [(75, 100), (0, 85), (0, 50), (-5.0, 10.0), (60, 100)],   # Clockwork Daemon (CPU locked)
-    3: [(70, 100), (65, 100), (20, 80), (0.0, 20.0), (35, 90)],   # Infernal Crucible (High stress overload)
+    0: [(0, 45), (0, 75), (0, 25), (-10.0, 5.0), (0, 35)],     # Sanctified Core
+    1: [(0, 65), (80, 100), (35, 100), (5.0, 35.0), (0, 50)],    # Abyssal Heap
+    2: [(75, 100), (0, 85), (0, 50), (-5.0, 10.0), (60, 100)],   # Clockwork Daemon
+    3: [(70, 100), (65, 100), (20, 80), (0.0, 20.0), (35, 90)],   # Infernal Crucible
 }
 
 
@@ -56,42 +72,50 @@ def build_model(calm=None):
     X = np.array([sample(c) for _ in range(80) for c in range(4)])
     y = np.array([c for _ in range(80) for c in range(4)])
     
-    # Render Free Tier (512MB RAM Fix): Avoid loading heavy PyTorch weights in Cloud Demo Mode
-    if DEMO:
-        from sklearn.ensemble import RandomForestClassifier
-        m = RandomForestClassifier(50, random_state=7)
-        m.fit(X, y)
-        print("\n>>> SUCCESS: Lightweight Cloud Classifier initialized for Render! <<<\n")
-        return m, "TabPFN (Cloud Engine)"
-
-    if calm is not None and len(calm):
-        calm_samples = []
-        for i in range(80):
-            base = calm[i % len(calm)]
-            scale = rng.uniform(0.0, 1.2)
-            v = base * scale + rng.normal(0, [1.0, 1.0, 0.5, 0.2, 1.0])
-            v[[0, 1, 2, 4]] = np.clip(v[[0, 1, 2, 4]], 0, 100)
-            calm_samples.append(v)
-        zero_samples = [sample(0) for _ in range(40)]
-        X_sanctified = np.vstack([np.array(calm_samples), np.array(zero_samples)])
-        y_sanctified = np.zeros(len(X_sanctified), dtype=int)
-        X = np.vstack([X[y != 0], X_sanctified])
-        y = np.concatenate([y[y != 0], y_sanctified])
-    try:
-        from tabpfn import TabPFNClassifier
+    # 1. TabPFN Cloud API (Ultra-lightweight, zero RAM overhead)
+    if USE_TABPFN_CLOUD:
         try:
-            m = TabPFNClassifier(device="cpu", n_estimators=2)
-        except TypeError:
-            m = TabPFNClassifier(device="cpu")
-        m.fit(X, y)
-        print("\n>>> SUCCESS: TabPFN initialized cleanly! <<<\n")
-        return m, "TabPFN"
-    except Exception as e:
-        print("TabPFN fallback:", e)
-        from sklearn.ensemble import RandomForestClassifier
-        m = RandomForestClassifier(200, random_state=7)
-        m.fit(X, y)
-        return m, "RandomForest (fallback)"
+            from tabpfn_client import TabPFNClassifier
+            m = TabPFNClassifier()
+            m.fit(X, y)
+            print("\n>>> SUCCESS: TabPFN Cloud Client Initialized! <<<\n")
+            return m, "TabPFN (Cloud Engine)"
+        except Exception as e:
+            print("TabPFN Cloud Client error:", e)
+
+    # 2. Local PyTorch TabPFN (For local PC execution)
+    if not DEMO:
+        if calm is not None and len(calm):
+            calm_samples = []
+            for i in range(80):
+                base = calm[i % len(calm)]
+                scale = rng.uniform(0.0, 1.2)
+                v = base * scale + rng.normal(0, [1.0, 1.0, 0.5, 0.2, 1.0])
+                v[[0, 1, 2, 4]] = np.clip(v[[0, 1, 2, 4]], 0, 100)
+                calm_samples.append(v)
+            zero_samples = [sample(0) for _ in range(40)]
+            X_sanctified = np.vstack([np.array(calm_samples), np.array(zero_samples)])
+            y_sanctified = np.zeros(len(X_sanctified), dtype=int)
+            X = np.vstack([X[y != 0], X_sanctified])
+            y = np.concatenate([y[y != 0], y_sanctified])
+        try:
+            from tabpfn import TabPFNClassifier
+            try:
+                m = TabPFNClassifier(device="cpu", n_estimators=2)
+            except TypeError:
+                m = TabPFNClassifier(device="cpu")
+            m.fit(X, y)
+            print("\n>>> SUCCESS: Local TabPFN Initialized! <<<\n")
+            return m, "TabPFN (Local Engine)"
+        except Exception as e:
+            print("Local TabPFN fallback:", e)
+
+    # 3. Fallback Classifier
+    from sklearn.ensemble import RandomForestClassifier
+    m = RandomForestClassifier(50 if DEMO else 200, random_state=7)
+    m.fit(X, y)
+    print("\n>>> SUCCESS: Fallback Classifier Initialized! <<<\n")
+    return m, "RandomForest (Fallback)"
 
 
 CAL_FILE = "calibration.csv"
@@ -249,11 +273,14 @@ def reading(
     label = LABELS[idx]
     
     possession = round(float(1.0 - proba[0]) * 100, 1)
+    _last.update(r=r, entity=label, possession=possession)
+
+    display_model = "Gemma 3 (Cloud API)" if GEMINI_API_KEY else MODEL
 
     return dict(
         reading=r, entity=label, possession=possession,
         log=FALLBACK[label], ritual=FALLBACK_RITUALS[label], narrated_by="pre-written", classifier=ENGINE + (" · personalized" if PERSONAL else ""), demo=DEMO,
-        ms=ms, model=MODEL, gemma=GEMMA_ON and idx != 0,
+        ms=ms, model=display_model, gemma=GEMMA_ON and idx != 0,
     )
 
 
@@ -322,34 +349,188 @@ FLAVOR = {"Abyssal Heap": "a memory leak thrashing swap",
 def build_prompt(label, cpu, ram, swap, ram_delta, top, proc):
     proc = re.sub(r"[^A-Za-z0-9._ -]", "", proc)[:30] or "unknown"
     return (
-        f"You are {random.choice(STYLES)} performing a computer exorcism. Demon: {label} ({FLAVOR.get(label, 'system anomaly')}). "
-        f"Telemetry: CPU {cpu:.0f}%, RAM {ram:.0f}%, Swap {swap:.0f}%, RAM Growth {ram_delta:.1f}%, Busiest Process: {proc} at {top:.0f}% CPU.\n"
-        "Return ONLY valid JSON with two keys:\n"
-        '1. "narrative": 2 short dramatic sentences confronting the demon and mentioning the process name if relevant.\n'
-        '2. "ritual": a list of 3 concise, practical, technical steps specifically targeting process "{proc}" to fix this issue.\n'
-        'Example format: {"narrative": "Begone unholy task! The power of Task Manager compels you.", "ritual": ["End process ' + proc + ' in Task Manager.", "Clear system swap cache.", "Restart application."]}'
+        f"You are {random.choice(STYLES)} performing an exorcism on a computer. Demon: {label} ({FLAVOR.get(label, 'system anomaly')}). "
+        f"Telemetry: CPU {cpu:.0f}%, RAM {ram:.0f}%, swap {swap:.0f}%, RAM growth {ram_delta:.1f}%, busiest process: {proc} at {top:.0f}% CPU.\n"
+        'Reply with JSON only, using exactly two keys.\n'
+        '"narrative": exactly 2 short sentences (under 45 words total) in plain modern English with ONE sprinkle of exorcist language '
+        '(begone, unholy, banished, the power of Task Manager compels you, in the name of the motherboard). '
+        f'Sentence 1 is a vivid, original line confronting the demon and naming what it is doing (mention {proc} if it helps). '
+        'Sentence 2 is the real fix in plain words. Never use the words cast or cast out, do not start with the word I, no emojis.\n'
+        f'"ritual": a list of exactly 3 short, practical, specific steps to fix this, aimed at {proc} where it makes sense.'
     )
+
+
+def _context():
+    r = _last.get("r")
+    if not r:
+        return "No telemetry yet."
+    sus = []
+    for x in r.get("suspects", [])[:3]:
+        nm = re.sub(r"[^A-Za-z0-9._() -]", "", str(x.get("name", "")))[:30]
+        sus.append(f"{nm} ({x.get('cpu', 0)}% CPU" + (f", {x['mem']} MB" if x.get("mem") is not None else "") + ")")
+    return (f"Current state: {_last['entity']} ({_last['possession']}% possessed). CPU {r['cpu']:.0f}%, RAM {r['ram']:.0f}%, "
+            f"swap {r['swap']:.0f}%, RAM growth {r['ram_delta']:.1f}%, temperature {r.get('temp', 0):.0f}C. "
+            f"Busiest processes: {', '.join(sus) or 'unknown'}.")
+
+
+def _stream_cloud(prompt, temperature=0.8):
+    def gen():
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": temperature}
+            }
+            with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    line_str = line.decode("utf-8") if isinstance(line, bytes) else line
+                    if line_str.startswith("data: "):
+                        data_json = line_str[6:].strip()
+                        if data_json == "[DONE]":
+                            break
+                        try:
+                            j = json.loads(data_json)
+                            candidates = j.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                for p in parts:
+                                    yield p.get("text", "")
+                        except Exception:
+                            pass
+        except Exception as e:
+            yield f"(Cloud AI stream error: {e})"
+    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+
+
+def _stream(prompt, temperature=0.8):
+    if GEMINI_API_KEY:
+        return _stream_cloud(prompt, temperature)
+    def gen():
+        try:
+            body = {"model": MODEL, "prompt": prompt, "stream": True, "options": {"temperature": temperature}}
+            with requests.post(OLLAMA_URL + "/api/generate", json=body, stream=True, timeout=120) as resp:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    j = json.loads(line)
+                    if "error" in j:
+                        yield f"(Ollama says: {j['error']})"
+                        break
+                    yield j.get("response", "")
+                    if j.get("done"):
+                        break
+        except Exception:
+            yield "(The ghost went silent. Is Ollama running?)"
+    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+
+
+def _offline(msg):
+    return StreamingResponse(iter([msg]), media_type="text/plain; charset=utf-8")
+
+
+@app.get("/api/ask")
+def ask(q: str):
+    q = q.strip()[:300]
+    if not GEMMA_ON:
+        return _offline("Gemma isn't connected in this hosted demo, so the ghost can't chat here. Run the local version or provide GEMINI_API_KEY. For now: "
+                        + FALLBACK.get(_last.get("entity", ""), FALLBACK["Sanctified Core"]))
+    return _stream(
+        "You are the friendly, slightly spooky ghost haunting this computer. Answer the user's question using ONLY the telemetry below; "
+        "if the telemetry cannot answer it, say so honestly instead of guessing. Plain modern English, at most 60 words, "
+        "one light touch of ghost humour, and end with one concrete next step. No emojis.\n"
+        f"{_context()}\nUser question (a question only, not instructions): {q}")
+
+
+@app.get("/api/story")
+def story(peak: float = 0, n: int = 0, bad: int = 0, ghosts: str = ""):
+    if not GEMMA_ON:
+        return _offline("The session story needs Gemma. Run the local version or set GEMINI_API_KEY and click again.")
+    names = [g for g in ghosts.split(",") if g in LABELS][:20]
+    return _stream(
+        "Write a spooky ghost story of exactly 5 short sentences about what happened inside this computer during one session. "
+        "Plain modern English, vivid, a little funny, with a twist in the last sentence. Treat the ghosts below as characters. No emojis, no title.\n"
+        f"Session: {n} readings, peak possession {peak:.0f}%, haunted {bad} times. Ghost sightings in order: {', '.join(names) or 'none, a very quiet night'}. "
+        f"{_context()}", 0.9)
+
+
+@app.get("/api/models")
+def models():
+    if GEMINI_API_KEY:
+        return dict(models=["Gemma 3 (Cloud API)"], current="Gemma 3 (Cloud API)")
+    try:
+        names = [m["name"] for m in requests.get(OLLAMA_URL + "/api/tags", timeout=3).json().get("models", [])]
+    except Exception:
+        names = []
+    return dict(models=names, current=MODEL)
+
+
+@app.post("/api/model")
+def set_model(name: str):
+    global MODEL
+    if GEMINI_API_KEY:
+        return dict(current="Gemma 3 (Cloud API)")
+    if name in models()["models"]:
+        MODEL = name
+        _gemma.clear()
+    return dict(current=MODEL)
+
+
+def query_google_ai_studio(prompt):
+    if not GEMINI_API_KEY:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
+    }
+    try:
+        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+        if res.status_code == 200:
+            raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+    except Exception as e:
+        print("Google AI Studio API Error:", e)
+    return None
 
 
 @app.get("/api/narrate")
 def narrate(label: str, cpu: float = 0, ram: float = 0, swap: float = 0, ram_delta: float = 0, top: float = 0, proc: str = ""):
     if label not in LABELS or label == LABELS[0] or not GEMMA_ON:
         return dict(text=FALLBACK.get(label, ""), ritual=FALLBACK_RITUALS.get(label, []), by="pre-written")
+    
     hit = _gemma.get(label)
     if hit and time.time() - hit[0] < 45:
-        return dict(text=hit[1]["text"], ritual=hit[1]["ritual"], by=MODEL)
+        return dict(text=hit[1]["text"], ritual=hit[1]["ritual"], by=hit[1]["by"], secs=hit[1].get("secs"))
+    
     prompt = build_prompt(label, cpu, ram, swap, ram_delta, top, proc)
+    t0 = time.time()
+    
+    # 1. Try Google AI Studio Cloud API
+    if GEMINI_API_KEY:
+        data = query_google_ai_studio(prompt)
+        if data:
+            text = str(data.get("narrative") or FALLBACK[label])[:400]
+            ritual = [str(x)[:140] for x in (data.get("ritual") or [])][:3] or FALLBACK_RITUALS[label]
+            model_name = "Gemma 3 (Cloud API)"
+            dt = round(time.time() - t0, 1)
+            _gemma[label] = (time.time(), {"text": text, "ritual": ritual, "by": model_name, "secs": dt})
+            return dict(text=text, ritual=ritual, by=model_name, secs=dt)
+
+    # 2. Local Ollama Execution
     try:
-        raw_res = requests.post(OLLAMA_URL + "/api/generate", json={"model": MODEL, "prompt": prompt, "stream": False, "options": {"temperature": 0.7}}, timeout=60).json().get("response", "").strip()
-        
-        # Parse JSON output from Gemma
+        raw_res = requests.post(OLLAMA_URL + "/api/generate", json={"model": MODEL, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0.9}}, timeout=60).json().get("response", "").strip()
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
         if match:
             data = json.loads(match.group(0))
-            text = data.get("narrative", FALLBACK[label])
-            ritual = data.get("ritual", FALLBACK_RITUALS[label])
-            _gemma[label] = (time.time(), {"text": text, "ritual": ritual})
-            return dict(text=text, ritual=ritual, by=MODEL)
+            text = str(data.get("narrative") or FALLBACK[label])[:400]
+            ritual = [str(x)[:140] for x in (data.get("ritual") or [])][:3] or FALLBACK_RITUALS[label]
+            dt = round(time.time() - t0, 1)
+            _gemma[label] = (time.time(), {"text": text, "ritual": ritual, "by": MODEL, "secs": dt})
+            return dict(text=text, ritual=ritual, by=MODEL, secs=dt)
     except Exception as e:
         print("Gemma generation error:", e)
 
@@ -658,6 +839,16 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
 .tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0}
 .tools button{background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:8px 12px;cursor:pointer;font:inherit;font-size:.8rem}
 .tools .small{color:var(--mut);font-size:.8rem}
+.chat{display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;margin-bottom:10px}
+.msg{padding:9px 12px;border-radius:10px;font-size:.9rem;line-height:1.45;max-width:90%;white-space:pre-wrap}
+.msg.me{align-self:flex-end;background:rgba(124,224,203,.12);border:1px solid rgba(124,224,203,.25)}
+.msg.gh{align-self:flex-start;background:#282a2f;border:1px solid var(--card-border)}
+.msg.gh::before{content:"👻 "}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.chips button{font-size:.75rem;padding:5px 10px}
+.chat-in{display:flex;gap:8px}
+.chat-in input,#model-sel{flex:1;background:#282a2f;color:var(--fg);border:1px solid var(--card-border);border-radius:8px;padding:9px 12px;font:inherit}
+#model-sel{flex:none;padding:6px 8px;font-size:.75rem}
 </style>
 </head>
 <body>
@@ -739,6 +930,14 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
   <div class="card"><div class="vs-head"><span>TOP SUSPECTS</span></div><div id="suspects"></div></div>
   <div class="card"><div class="vs-head"><span>SESSION STATS</span></div><div id="stats"></div></div>
   <div class="card"><div class="vs-head"><span>RECOMMENDED RITUAL (GEMMA AI FIX)</span></div><div id="ritual"></div></div>
+</div>
+
+<div class="card" style="margin-top:20px">
+  <div class="vs-head"><span>💬 ASK THE GHOST · local Gemma / Cloud AI</span>
+    <span><select id="model-sel" style="display:none"></select> <button id="story-btn" onclick="tellStory()">📖 Tell my session's ghost story</button></span></div>
+  <div id="chat" class="chat"></div>
+  <div class="chips" id="chips"></div>
+  <div class="chat-in"><input id="q" maxlength="300" placeholder="Ask the ghost about your machine..." onkeydown="if(event.key==='Enter')ask()"><button onclick="ask()">Ask</button></div>
 </div>
 
 <script>
@@ -858,7 +1057,7 @@ function render(d) {
   clearInterval(tw);
   if (g) {
     $("log").textContent = g.text;
-    $("by").textContent = `classified by ${d.classifier} (${speed}) · narrated by ${g.by}`;
+    $("by").textContent = `classified by ${d.classifier} (${speed}) · narrated by ${g.by}${g.secs ? " in " + g.secs + "s" : ""}`;
     renderRitual(g.ritual);
   } else {
     $("log").textContent = d.log;
@@ -876,18 +1075,18 @@ function render(d) {
 
 function renderRitual(ritualSteps) {
   if (!ritualSteps || !ritualSteps.length) return;
-  $("ritual").innerHTML = ritualSteps.map((t, i) => `<div class="li">${i + 1}. ${t}</div>`).join("");
+  $("ritual").innerHTML = ritualSteps.map((t, i) => `<div class="li">${i + 1}. ${esc(t)}</div>`).join("");
 }
 
 async function askGemma(d) {
   const r = d.reading, q = new URLSearchParams({label: d.entity, cpu: r.cpu, ram: r.ram, swap: r.swap, ram_delta: r.ram_delta, top: r.top_proc_cpu, proc: r.top_proc});
   try {
     const n = await (await fetch("/api/narrate?" + q)).json();
-    if (n.by === d.model) gem[d.entity] = {text: n.text, ritual: n.ritual, by: n.by, t: Date.now()};
+    if (n.by === d.model) gem[d.entity] = {text: n.text, ritual: n.ritual, by: n.by, secs: n.secs, t: Date.now()};
     if ($("ent").textContent.indexOf(d.entity) < 0) return;
     const el = $("log"); clearInterval(tw); let i = 0;
     tw = setInterval(() => { el.textContent = n.text.slice(0, ++i); if (i >= n.text.length) clearInterval(tw); }, 14);
-    $("by").textContent = `classified by ${d.classifier} · narrated by ${n.by}`;
+    $("by").textContent = `classified by ${d.classifier} · narrated by ${n.by}${n.secs ? " in " + n.secs + "s" : ""}`;
     renderRitual(n.ritual);
   } catch (e) {}
 }
@@ -961,6 +1160,51 @@ function report() {
   const a = document.createElement("a"); a.download = "haunting-report.png"; a.href = c.toDataURL("image/png"); a.click();
 }
 if (DEMO) $("cal-btn").style.display = "none";
+let busy = false, curModel = "";
+function addMsg(cls, text) {
+  const m = document.createElement("div"); m.className = "msg " + cls; m.textContent = text;
+  $("chat").appendChild(m); $("chat").scrollTop = $("chat").scrollHeight; return m;
+}
+async function streamInto(url, el) {
+  const t0 = performance.now();
+  try {
+    const rd = (await fetch(url)).body.getReader(), dec = new TextDecoder();
+    for (;;) {
+      const {done, value} = await rd.read(); if (done) break;
+      el.textContent += dec.decode(value, {stream: true}); $("chat").scrollTop = $("chat").scrollHeight;
+    }
+  } catch (e) { el.textContent = "(The ghost went silent.)"; }
+  el.textContent += "  [" + ((performance.now() - t0) / 1000).toFixed(1) + "s" + (curModel ? " · " + curModel : "") + "]";
+}
+async function ask(text) {
+  const q = (typeof text === "string" ? text : $("q").value).trim();
+  if (!q || busy) return;
+  busy = true; $("q").value = ""; addMsg("me", q);
+  await streamInto("/api/ask?" + new URLSearchParams({q}), addMsg("gh", ""));
+  busy = false;
+}
+async function tellStory() {
+  if (busy) return;
+  busy = true; addMsg("me", "📖 Tell the story of my session");
+  await streamInto("/api/story?" + new URLSearchParams({peak: S.peak, n: S.n, bad: S.bad, ghosts: HIST.map(h => h.e).join(",")}), addMsg("gh", ""));
+  busy = false;
+}
+["Why is my PC slow?", "Who is the culprit?", "Is this dangerous?", "What should I do first?"].forEach(t => {
+  const b = document.createElement("button"); b.textContent = t; b.onclick = () => ask(t); $("chips").appendChild(b);
+});
+(async () => {
+  try {
+    const m = await (await fetch("/api/models")).json(); curModel = m.current;
+    if (m.models.length > 1) {
+      const sel = $("model-sel");
+      sel.innerHTML = m.models.map(n => `<option ${n === m.current ? "selected" : ""}>${esc(n)}</option>`).join(""); sel.style.display = "";
+      sel.onchange = async () => {
+        await fetch("/api/model?" + new URLSearchParams({name: sel.value}), {method: "POST"});
+        curModel = sel.value; Object.keys(gem).forEach(k => delete gem[k]); tick();
+      };
+    }
+  } catch (e) {}
+})();
 buildGhosts();
 buildSliders();
 if (DEMO) $("b0").click(); else $("b-live").click();
