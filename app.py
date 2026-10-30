@@ -376,7 +376,7 @@ def _context():
 def _stream_cloud(prompt, temperature=0.8):
     def gen():
         try:
-            # Changed from v1beta to v1
+            # UPDATED: Using v1 endpoint and gemma-3-4b-it
             url = f"https://generativelanguage.googleapis.com/v1/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
@@ -407,9 +407,6 @@ def _stream_cloud(prompt, temperature=0.8):
                         if "error" in j:
                             yield f"(Cloud AI error: {j['error'].get('message', 'Unknown error')})"
                             break
-                        if "promptFeedback" in j and "blockReason" in j["promptFeedback"]:
-                            yield f"(Response blocked by safety filters: {j['promptFeedback']['blockReason']})"
-                            break
                             
                         candidates = j.get("candidates", [])
                         if candidates:
@@ -429,21 +426,50 @@ def _stream_cloud(prompt, temperature=0.8):
 def query_google_ai_studio(prompt):
     if not GEMINI_API_KEY:
         return None
-    # Changed from v1beta to v1
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemma-3-4b-it:generateContent?key={GEMINI_API_KEY}"
+    # UPDATED: Using v1 streaming endpoint because generateContent is blocked for Gemma
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
+        "generationConfig": {"temperature": 0.7} 
     }
     try:
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
-        if res.status_code == 200:
-            raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            match = re.search(r"{.*}", raw_text, re.DOTALL)
+        full_text = ""
+        with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+            if resp.status_code != 200:
+                print(f"Google API Error: {resp.status_code} {resp.text}")
+                return None
+                
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line_str = line.decode("utf-8") if isinstance(line, bytes) else line
+                
+                if line_str.startswith("data: "):
+                    data_json = line_str[6:].strip()
+                elif line_str.startswith("data:"):
+                    data_json = line_str[5:].strip()
+                else:
+                    continue
+                    
+                if data_json == "[DONE]":
+                    break
+                    
+                try:
+                    j = json.loads(data_json)
+                    candidates = j.get("candidates", [])
+                    if candidates:
+                        for p in candidates[0].get("content", {}).get("parts", []):
+                            full_text += p.get("text", "")
+                except Exception:
+                    pass
+        
+        # Parse the accumulated text as JSON
+        if full_text:
+            match = re.search(r"\{.*\}", full_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
     except Exception as e:
-        print("Google AI Studio API Error: ", e)
+        print("Google AI Studio Stream Error:", e)
     return None
 
 
