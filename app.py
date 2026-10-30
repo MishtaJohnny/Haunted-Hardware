@@ -12,11 +12,12 @@ if os.path.exists(".env"):
 
 # Extract API Keys
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TABPFN_TOKEN = os.getenv("TABPFN_TOKEN") or os.getenv("TABPFN_API_KEY")
 
 if TABPFN_TOKEN:
     os.environ["TABPFN_TOKEN"] = os.environ["TABPFN_API_KEY"] = TABPFN_TOKEN
-os.environ.setdefault("TABPFN_NO_BROWSER", "1")
+    os.environ.setdefault("TABPFN_NO_BROWSER", "1")
 
 # TabPFN Cloud Initialization
 USE_TABPFN_CLOUD = False
@@ -31,7 +32,7 @@ if TABPFN_TOKEN:
 MODEL = os.getenv("HAUNT_MODEL", "gemma3:4b")
 DEMO = os.getenv("DEMO_MODE") == "1"
 OLLAMA_URL = os.getenv("OLLAMA_URL") or "http://localhost:11434"
-GEMMA_ON = bool(GEMINI_API_KEY) or (not DEMO) or bool(os.getenv("OLLAMA_URL"))
+GEMMA_ON = bool(OPENROUTER_API_KEY) or bool(GEMINI_API_KEY) or (not DEMO) or bool(os.getenv("OLLAMA_URL"))
 
 LABELS = ["Sanctified Core", "Abyssal Heap", "Clockwork Daemon", "Infernal Crucible"]
 FEATURES = ["cpu", "ram", "swap", "ram_delta", "top_proc_cpu"]
@@ -240,46 +241,39 @@ def reading(
 ):
     if mode == "manual":
         r = dict(
-            cpu=cpu,
-            ram=ram,
-            swap=swap,
-            ram_delta=ram_delta,
-            proc_count=215,
-            temp=38.0 + (cpu * 0.45),
-            top_proc_cpu=top,
-            top_proc="manual",
-            temp_real=True,
+            cpu=cpu, ram=ram, swap=swap, ram_delta=ram_delta, proc_count=215,
+            temp=38.0 + (cpu * 0.45), top_proc_cpu=top, top_proc="manual", temp_real=True,
         )
     elif mode == "sim" or DEMO:
         v = sample(scenario)
         r = dict(
-            cpu=v[0],
-            ram=v[1],
-            swap=v[2],
-            ram_delta=v[3],
-            proc_count=int(180 + v[0] * 1.2),
-            temp=40.0 if scenario == 0 else (50.0 + v[0] * 0.4),
-            top_proc_cpu=v[4],
-            top_proc="simulated",
-            temp_real=True,
+            cpu=v[0], ram=v[1], swap=v[2], ram_delta=v[3], proc_count=int(180 + v[0] * 1.2),
+            temp=40.0 if scenario == 0 else (50.0 + v[0] * 0.4), top_proc_cpu=v[4], top_proc="simulated", temp_real=True,
         )
     else:
         r = live_reading()
 
     if not r.get("suspects"):
         r["suspects"] = [dict(name="(simulated) rogue_process", cpu=round(r["top_proc_cpu"], 1), mem=None)]
+        
     proba, ms = classify(r)
     idx = int(np.argmax(proba))
     label = LABELS[idx]
-    
     possession = round(float(1.0 - proba[0]) * 100, 1)
     _last.update(r=r, entity=label, possession=possession)
 
-    display_model = "Gemma 3 (Cloud API)" if GEMINI_API_KEY else MODEL
+    # Updated model display logic to prioritize OpenRouter
+    if os.getenv("OPENROUTER_API_KEY"):
+        display_model = "Gemma 3 4B (OpenRouter)"
+    elif GEMINI_API_KEY:
+        display_model = "Gemma 3 (Cloud API)"
+    else:
+        display_model = MODEL
 
     return dict(
         reading=r, entity=label, possession=possession,
-        log=FALLBACK[label], ritual=FALLBACK_RITUALS[label], narrated_by="pre-written", classifier=ENGINE + (" · personalized" if PERSONAL else ""), demo=DEMO,
+        log=FALLBACK[label], ritual=FALLBACK_RITUALS[label], narrated_by="pre-written", 
+        classifier=ENGINE + (" · personalized" if PERSONAL else ""), demo=DEMO,
         ms=ms, model=display_model, gemma=GEMMA_ON and idx != 0,
     )
 
@@ -378,7 +372,7 @@ def _stream_cloud(prompt, temperature=0.8):
         try:
             url = "https://openrouter.ai/api/v1/chat/completions"
             headers = {
-                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://render.com",
                 "X-Title": "Haunted Hardware"
@@ -395,8 +389,7 @@ def _stream_cloud(prompt, temperature=0.8):
                     return
                     
                 for line in resp.iter_lines():
-                    if not line:
-                        continue
+                    if not line: continue
                     line_str = line.decode("utf-8") if isinstance(line, bytes) else line
                     
                     if line_str.startswith("data: "):
@@ -406,35 +399,29 @@ def _stream_cloud(prompt, temperature=0.8):
                     else:
                         continue
                         
-                    if data_json == "[DONE]":
-                        break
-                        
+                    if data_json == "[DONE]": break
+                    
                     try:
                         j = json.loads(data_json)
                         if "error" in j:
                             yield f"(Cloud AI error: {j['error'].get('message', 'Unknown error')})"
                             break
-                            
                         choices = j.get("choices", [])
                         if choices:
                             delta = choices[0].get("delta", {})
                             text = delta.get("content", "")
-                            if text:
-                                yield text
-                        else:
-                            yield "(Empty response from Cloud AI)"
-                    except Exception as e:
-                        yield f"(Parse error: {e})"
+                            if text: yield text
+                    except Exception: pass
         except Exception as e:
             yield f"(Cloud AI stream error: {e})"
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 
-def query_google_ai_studio(prompt):
-    if not os.getenv("OPENROUTER_API_KEY"):
+def query_openrouter(prompt):
+    if not OPENROUTER_API_KEY:
         return None
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "https://render.com",
         "X-Title": "Haunted Hardware"
@@ -458,22 +445,20 @@ def query_google_ai_studio(prompt):
 
 
 def _stream(prompt, temperature=0.8):
-    if GEMINI_API_KEY:
+    if OPENROUTER_API_KEY or GEMINI_API_KEY:
         return _stream_cloud(prompt, temperature)
     def gen():
         try:
             body = {"model": MODEL, "prompt": prompt, "stream": True, "options": {"temperature": temperature}}
             with requests.post(OLLAMA_URL + "/api/generate", json=body, stream=True, timeout=120) as resp:
                 for line in resp.iter_lines():
-                    if not line:
-                        continue
+                    if not line: continue
                     j = json.loads(line)
                     if "error" in j:
                         yield f"(Ollama says: {j['error']})"
                         break
                     yield j.get("response", "")
-                    if j.get("done"):
-                        break
+                    if j.get("done"): break
         except Exception:
             yield "(The ghost went silent. Is Ollama running?)"
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
@@ -510,6 +495,9 @@ def story(peak: float = 0, n: int = 0, bad: int = 0, ghosts: str = ""):
 
 @app.get("/api/models")
 def models():
+    # Updated to prioritize OpenRouter
+    if os.getenv("OPENROUTER_API_KEY"):
+        return dict(models=["Gemma 3 4B (OpenRouter)"], current="Gemma 3 4B (OpenRouter)")
     if GEMINI_API_KEY:
         return dict(models=["Gemma 3 (Cloud API)"], current="Gemma 3 (Cloud API)")
     try:
@@ -536,21 +524,19 @@ def set_model(name: str):
 def narrate(label: str, cpu: float = 0, ram: float = 0, swap: float = 0, ram_delta: float = 0, top: float = 0, proc: str = ""):
     if label not in LABELS or label == LABELS[0] or not GEMMA_ON:
         return dict(text=FALLBACK.get(label, ""), ritual=FALLBACK_RITUALS.get(label, []), by="pre-written")
-    
     hit = _gemma.get(label)
     if hit and time.time() - hit[0] < 45:
         return dict(text=hit[1]["text"], ritual=hit[1]["ritual"], by=hit[1]["by"], secs=hit[1].get("secs"))
-    
     prompt = build_prompt(label, cpu, ram, swap, ram_delta, top, proc)
     t0 = time.time()
     
-    # 1. Try Google AI Studio Cloud API
-    if GEMINI_API_KEY:
-        data = query_google_ai_studio(prompt)
+    # 1. Try OpenRouter Cloud API
+    if OPENROUTER_API_KEY:
+        data = query_openrouter(prompt)
         if data:
             text = str(data.get("narrative") or FALLBACK[label])[:400]
             ritual = [str(x)[:140] for x in (data.get("ritual") or [])][:3] or FALLBACK_RITUALS[label]
-            model_name = "Gemma 3 (Cloud API)"
+            model_name = "Gemma 3 4B (OpenRouter)"
             dt = round(time.time() - t0, 1)
             _gemma[label] = (time.time(), {"text": text, "ritual": ritual, "by": model_name, "secs": dt})
             return dict(text=text, ritual=ritual, by=model_name, secs=dt)
@@ -568,7 +554,6 @@ def narrate(label: str, cpu: float = 0, ram: float = 0, swap: float = 0, ram_del
             return dict(text=text, ritual=ritual, by=MODEL, secs=dt)
     except Exception as e:
         print("Gemma generation error:", e)
-
     return dict(text=FALLBACK[label], ritual=FALLBACK_RITUALS[label], by="pre-written (Ollama unreachable)")
 
 
