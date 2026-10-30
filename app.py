@@ -376,32 +376,75 @@ def _context():
 def _stream_cloud(prompt, temperature=0.8):
     def gen():
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+            # UPDATED: Pointing to Gemma 3 4B Instruct on Google AI Studio
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature}
             }
             with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+                if resp.status_code != 200:
+                    yield f"(Cloud AI error {resp.status_code}: {resp.text[:300]})"
+                    return
+                    
                 for line in resp.iter_lines():
                     if not line:
                         continue
                     line_str = line.decode("utf-8") if isinstance(line, bytes) else line
+                    
                     if line_str.startswith("data: "):
                         data_json = line_str[6:].strip()
-                        if data_json == "[DONE]":
+                    elif line_str.startswith("data:"):
+                        data_json = line_str[5:].strip()
+                    else:
+                        continue
+                        
+                    if data_json == "[DONE]":
+                        break
+                        
+                    try:
+                        j = json.loads(data_json)
+                        if "error" in j:
+                            yield f"(Cloud AI error: {j['error'].get('message', 'Unknown error')})"
                             break
-                        try:
-                            j = json.loads(data_json)
-                            candidates = j.get("candidates", [])
-                            if candidates:
-                                parts = candidates[0].get("content", {}).get("parts", [])
-                                for p in parts:
-                                    yield p.get("text", "")
-                        except Exception:
-                            pass
+                        if "promptFeedback" in j and "blockReason" in j["promptFeedback"]:
+                            yield f"(Response blocked by safety filters: {j['promptFeedback']['blockReason']})"
+                            break
+                            
+                        candidates = j.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for p in parts:
+                                text = p.get("text", "")
+                                if text:
+                                    yield text
+                        else:
+                            yield "(Empty response from Cloud AI)"
+                    except Exception as e:
+                        yield f"(Parse error: {e})"
         except Exception as e:
             yield f"(Cloud AI stream error: {e})"
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+
+def query_google_ai_studio(prompt):
+    if not GEMINI_API_KEY:
+        return None
+    # UPDATED: Pointing to Gemma 3 4B Instruct
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
+    }
+    try:
+        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+        if res.status_code == 200:
+            raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            match = re.search(r"{.*}", raw_text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+    except Exception as e:
+        print("Google AI Studio API Error: ", e)
+    return None
 
 
 def _stream(prompt, temperature=0.8):
@@ -477,24 +520,6 @@ def set_model(name: str):
     return dict(current=MODEL)
 
 
-def query_google_ai_studio(prompt):
-    if not GEMINI_API_KEY:
-        return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
-    }
-    try:
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
-        if res.status_code == 200:
-            raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-    except Exception as e:
-        print("Google AI Studio API Error:", e)
-    return None
 
 
 @app.get("/api/narrate")
