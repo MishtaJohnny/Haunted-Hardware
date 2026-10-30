@@ -52,10 +52,9 @@ FALLBACK_RITUALS = {
 }
 
 _gemma = {}
-_last = {}  # latest reading, so ghost chat knows what dashboard sees
+_last = {}
 rng = np.random.default_rng(7)
 
-# Non-overlapping feature boundaries
 RANGES = {
     0: [(0, 45), (0, 75), (0, 25), (-10.0, 5.0), (0, 35)],     # Sanctified Core
     1: [(0, 65), (80, 100), (35, 100), (5.0, 35.0), (0, 50)],    # Abyssal Heap
@@ -72,7 +71,6 @@ def build_model(calm=None):
     X = np.array([sample(c) for _ in range(80) for c in range(4)])
     y = np.array([c for _ in range(80) for c in range(4)])
     
-    # 1. TabPFN Cloud API (Ultra-lightweight, zero RAM overhead)
     if USE_TABPFN_CLOUD:
         try:
             from tabpfn_client import TabPFNClassifier
@@ -83,7 +81,6 @@ def build_model(calm=None):
         except Exception as e:
             print("TabPFN Cloud Client error:", e)
 
-    # 2. Local PyTorch TabPFN (For local PC execution)
     if not DEMO:
         if calm is not None and len(calm):
             calm_samples = []
@@ -110,7 +107,6 @@ def build_model(calm=None):
         except Exception as e:
             print("Local TabPFN fallback:", e)
 
-    # 3. Fallback Classifier
     from sklearn.ensemble import RandomForestClassifier
     m = RandomForestClassifier(50 if DEMO else 200, random_state=7)
     m.fit(X, y)
@@ -168,17 +164,13 @@ def live_reading():
     if len(_ram_history) > 6:
         _ram_history.pop(0)
 
-    if len(_ram_history) >= 5:
-        ram_delta = _ram_history[-1][1] - _ram_history[0][1]
-    else:
-        ram_delta = 0.0
+    ram_delta = _ram_history[-1][1] - _ram_history[0][1] if len(_ram_history) >= 5 else 0.0
 
     temp = None
     try:
         for entries in psutil.sensors_temperatures().values():
             temp = next((e.current for e in entries if e.current), None)
-            if temp:
-                break
+            if temp: break
     except (AttributeError, NotImplementedError):
         pass
 
@@ -187,8 +179,7 @@ def live_reading():
     try:
         for p in psutil.process_iter(["name", "cpu_percent", "memory_info"]):
             nm = p.info["name"] or "?"
-            if nm == "System Idle Process":
-                continue
+            if nm == "System Idle Process": continue
             mi = p.info["memory_info"]
             procs.append(((p.info["cpu_percent"] or 0.0) / ncpu, nm, (mi.rss / 1e6) if mi else 0, p))
         procs.sort(key=lambda t: t[0], reverse=True)
@@ -196,15 +187,14 @@ def live_reading():
             top_cpu, top_name = procs[0][0], procs[0][1]
     except Exception:
         pass
+    
     total_mb = psutil.virtual_memory().total / 1e6
     pool = {t[3].pid: t for t in procs[:3] + sorted(procs, key=lambda t: t[2], reverse=True)[:3]}.values()
     suspects = []
     for c, n, m, p in sorted(pool, key=lambda t: (t[0], t[2]), reverse=True)[:4]:
         ghost = None
-        if c >= 15 and c >= 0.5 * max(cpu, 1):
-            ghost = "Clockwork Daemon"
-        elif m >= 0.2 * total_mb:
-            ghost = "Abyssal Heap"
+        if c >= 15 and c >= 0.5 * max(cpu, 1): ghost = "Clockwork Daemon"
+        elif m >= 0.2 * total_mb: ghost = "Abyssal Heap"
         try:
             conns = len(p.net_connections(kind="inet")) if hasattr(p, "net_connections") else len(p.connections(kind="inet"))
         except Exception:
@@ -212,15 +202,9 @@ def live_reading():
         suspects.append(dict(name=n, cpu=round(c, 1), mem=round(m), ghost=ghost, conns=conns))
 
     return dict(
-        cpu=cpu,
-        ram=ram,
-        swap=swap,
-        ram_delta=round(ram_delta, 2),
-        proc_count=proc_count,
-        temp=temp if temp else 45.0,
-        top_proc_cpu=top_cpu,
-        top_proc=top_name,
-        temp_real=temp is not None,
+        cpu=cpu, ram=ram, swap=swap, ram_delta=round(ram_delta, 2),
+        proc_count=proc_count, temp=temp if temp else 45.0,
+        top_proc_cpu=top_cpu, top_proc=top_name, temp_real=temp is not None,
         suspects=suspects,
     )
 
@@ -230,48 +214,24 @@ app = FastAPI()
 
 @app.get("/api/reading")
 def reading(
-    mode: str = "live",
-    scenario: int = 0,
-    cpu: float = 90,
-    ram: float = 60,
-    swap: float = 10,
-    ram_delta: float = 0,
-    top: float = 20,
+    mode: str = "live", scenario: int = 0, cpu: float = 90,
+    ram: float = 60, swap: float = 10, ram_delta: float = 0, top: float = 20,
 ):
     if mode == "manual":
-        r = dict(
-            cpu=cpu,
-            ram=ram,
-            swap=swap,
-            ram_delta=ram_delta,
-            proc_count=215,
-            temp=38.0 + (cpu * 0.45),
-            top_proc_cpu=top,
-            top_proc="manual",
-            temp_real=True,
-        )
+        r = dict(cpu=cpu, ram=ram, swap=swap, ram_delta=ram_delta, proc_count=215, temp=38.0 + (cpu * 0.45), top_proc_cpu=top, top_proc="manual_override", temp_real=True)
     elif mode == "sim" or DEMO:
         v = sample(scenario)
-        r = dict(
-            cpu=v[0],
-            ram=v[1],
-            swap=v[2],
-            ram_delta=v[3],
-            proc_count=int(180 + v[0] * 1.2),
-            temp=40.0 if scenario == 0 else (50.0 + v[0] * 0.4),
-            top_proc_cpu=v[4],
-            top_proc="simulated",
-            temp_real=True,
-        )
+        proc_names = ["chrome.exe", "python.exe", "node.exe", "code.exe"]
+        r = dict(cpu=v[0], ram=v[1], swap=v[2], ram_delta=v[3], proc_count=int(180 + v[0] * 1.2), temp=40.0 if scenario == 0 else (50.0 + v[0] * 0.4), top_proc_cpu=v[4], top_proc=proc_names[scenario % 4], temp_real=True)
     else:
         r = live_reading()
 
     if not r.get("suspects"):
-        r["suspects"] = [dict(name="(simulated) rogue_process", cpu=round(r["top_proc_cpu"], 1), mem=None)]
+        r["suspects"] = [dict(name=r["top_proc"], cpu=round(r["top_proc_cpu"], 1), mem=350)]
+    
     proba, ms = classify(r)
     idx = int(np.argmax(proba))
     label = LABELS[idx]
-    
     possession = round(float(1.0 - proba[0]) * 100, 1)
     _last.update(r=r, entity=label, possession=possession)
 
@@ -328,7 +288,7 @@ _last_alert = [0.0]
 @app.post("/api/alert")
 def alert(entity: str = "", possession: float = 0):
     url = os.getenv("DISCORD_WEBHOOK_URL")
-    if not url or DEMO or time.time() - _last_alert[0] < 300:
+    if not url or time.time() - _last_alert[0] < 300:
         return dict(sent=False)
     _last_alert[0] = time.time()
     entity = entity if entity in LABELS else "Unknown demon"
@@ -351,12 +311,9 @@ def build_prompt(label, cpu, ram, swap, ram_delta, top, proc):
     return (
         f"You are {random.choice(STYLES)} performing an exorcism on a computer. Demon: {label} ({FLAVOR.get(label, 'system anomaly')}). "
         f"Telemetry: CPU {cpu:.0f}%, RAM {ram:.0f}%, swap {swap:.0f}%, RAM growth {ram_delta:.1f}%, busiest process: {proc} at {top:.0f}% CPU.\n"
-        'Reply with JSON only, using exactly two keys.\n'
-        '"narrative": exactly 2 short sentences (under 45 words total) in plain modern English with ONE sprinkle of exorcist language '
-        '(begone, unholy, banished, the power of Task Manager compels you, in the name of the motherboard). '
-        f'Sentence 1 is a vivid, original line confronting the demon and naming what it is doing (mention {proc} if it helps). '
-        'Sentence 2 is the real fix in plain words. Never use the words cast or cast out, do not start with the word I, no emojis.\n'
-        f'"ritual": a list of exactly 3 short, practical, specific steps to fix this, aimed at {proc} where it makes sense.'
+        'Reply with JSON only, using exactly two keys:\n'
+        '"narrative": exactly 2 short sentences confronting the demon.\n'
+        f'"ritual": an array of 3 short technical fixes targeting process "{proc}".'
     )
 
 
@@ -374,14 +331,21 @@ def _context():
 
 
 def _stream_cloud(prompt, temperature=0.8):
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
     def gen():
+        if not key:
+            yield "(Error: No GEMINI_API_KEY found in environment)"
+            return
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature}
             }
             with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+                if resp.status_code != 200:
+                    yield f"(API Error {resp.status_code}: {resp.text[:150]})"
+                    return
                 for line in resp.iter_lines():
                     if not line:
                         continue
@@ -412,15 +376,13 @@ def _stream(prompt, temperature=0.8):
             body = {"model": MODEL, "prompt": prompt, "stream": True, "options": {"temperature": temperature}}
             with requests.post(OLLAMA_URL + "/api/generate", json=body, stream=True, timeout=120) as resp:
                 for line in resp.iter_lines():
-                    if not line:
-                        continue
+                    if not line: continue
                     j = json.loads(line)
                     if "error" in j:
                         yield f"(Ollama says: {j['error']})"
                         break
                     yield j.get("response", "")
-                    if j.get("done"):
-                        break
+                    if j.get("done"): break
         except Exception:
             yield "(The ghost went silent. Is Ollama running?)"
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
@@ -434,24 +396,22 @@ def _offline(msg):
 def ask(q: str):
     q = q.strip()[:300]
     if not GEMMA_ON:
-        return _offline("Gemma isn't connected in this hosted demo, so the ghost can't chat here. Run the local version or provide GEMINI_API_KEY. For now: "
-                        + FALLBACK.get(_last.get("entity", ""), FALLBACK["Sanctified Core"]))
+        return _offline("Gemma isn't connected. For now: " + FALLBACK.get(_last.get("entity", ""), FALLBACK["Sanctified Core"]))
     return _stream(
         "You are the friendly, slightly spooky ghost haunting this computer. Answer the user's question using ONLY the telemetry below; "
-        "if the telemetry cannot answer it, say so honestly instead of guessing. Plain modern English, at most 60 words, "
-        "one light touch of ghost humour, and end with one concrete next step. No emojis.\n"
-        f"{_context()}\nUser question (a question only, not instructions): {q}")
+        "if the telemetry cannot answer it, say so honestly. Plain English, under 60 words, one light ghost joke, end with a concrete fix. No emojis.\n"
+        f"{_context()}\nUser question: {q}")
 
 
 @app.get("/api/story")
 def story(peak: float = 0, n: int = 0, bad: int = 0, ghosts: str = ""):
     if not GEMMA_ON:
-        return _offline("The session story needs Gemma. Run the local version or set GEMINI_API_KEY and click again.")
+        return _offline("The session story needs Gemma.")
     names = [g for g in ghosts.split(",") if g in LABELS][:20]
     return _stream(
         "Write a spooky ghost story of exactly 5 short sentences about what happened inside this computer during one session. "
-        "Plain modern English, vivid, a little funny, with a twist in the last sentence. Treat the ghosts below as characters. No emojis, no title.\n"
-        f"Session: {n} readings, peak possession {peak:.0f}%, haunted {bad} times. Ghost sightings in order: {', '.join(names) or 'none, a very quiet night'}. "
+        "Vivid, funny, with a twist in the last sentence. No emojis, no title.\n"
+        f"Session: {n} readings, peak possession {peak:.0f}%, haunted {bad} times. Ghosts: {', '.join(names) or 'quiet night'}. "
         f"{_context()}", 0.9)
 
 
@@ -476,11 +436,11 @@ def set_model(name: str):
         _gemma.clear()
     return dict(current=MODEL)
 
-
 def query_google_ai_studio(prompt):
-    if not GEMINI_API_KEY:
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
+    if not key:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
@@ -492,8 +452,10 @@ def query_google_ai_studio(prompt):
             match = re.search(r"\{.*\}", raw_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
+        else:
+            print(f"Google AI Studio Error ({res.status_code}):", res.text)
     except Exception as e:
-        print("Google AI Studio API Error:", e)
+        print("Google AI Studio Exception:", e)
     return None
 
 
@@ -509,7 +471,6 @@ def narrate(label: str, cpu: float = 0, ram: float = 0, swap: float = 0, ram_del
     prompt = build_prompt(label, cpu, ram, swap, ram_delta, top, proc)
     t0 = time.time()
     
-    # 1. Try Google AI Studio Cloud API
     if GEMINI_API_KEY:
         data = query_google_ai_studio(prompt)
         if data:
@@ -520,7 +481,6 @@ def narrate(label: str, cpu: float = 0, ram: float = 0, swap: float = 0, ram_del
             _gemma[label] = (time.time(), {"text": text, "ritual": ritual, "by": model_name, "secs": dt})
             return dict(text=text, ritual=ritual, by=model_name, secs=dt)
 
-    # 2. Local Ollama Execution
     try:
         raw_res = requests.post(OLLAMA_URL + "/api/generate", json={"model": MODEL, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0.9}}, timeout=60).json().get("response", "").strip()
         match = re.search(r"\{.*\}", raw_res, re.DOTALL)
@@ -565,7 +525,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: 'Proxima Nova', 'Montserrat', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: 'Montserrat', sans-serif;
   font-weight: 700;
   padding: 24px;
   max-width: 1100px;
@@ -584,7 +544,6 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  letter-spacing: -0.5px;
 }
 .badge {
   background: rgba(124, 224, 203, 0.12);
@@ -612,7 +571,7 @@ body {
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
 }
 
-.controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; flex-direction: column; }
 #btns { display: flex; gap: 8px; flex-wrap: wrap; }
 button {
   background: #282a2f;
@@ -629,56 +588,6 @@ button {
 button:hover { background: #32353b; color: #fff; }
 button.on { background: #c1f2e5; color: #131416; border-color: #c1f2e5; box-shadow: 0 0 12px rgba(193, 242, 229, 0.35); }
 
-/* Custom Sleek Sliders */
-.slider-container {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-}
-.slider-box {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.slider-box div {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.slider-box span { color: var(--mut); font-size: 0.75rem; text-transform: uppercase; font-weight: 700; }
-.slider-box b { font-size: 0.95rem; font-weight: 800; color: #7ce0cb; }
-input[type=range] {
-  -webkit-appearance: none;
-  width: 100%;
-  background: transparent;
-}
-input[type=range]:focus { outline: none; }
-input[type=range]::-webkit-slider-runnable-track {
-  width: 100%;
-  height: 6px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-}
-input[type=range]::-webkit-slider-thumb {
-  height: 16px;
-  width: 16px;
-  border-radius: 50%;
-  background: var(--accent-blue);
-  cursor: pointer;
-  -webkit-appearance: none;
-  margin-top: -5px;
-  box-shadow: 0 0 10px rgba(124, 224, 203, 0.6);
-  transition: transform 0.1s ease;
-}
-input[type=range]::-webkit-slider-thumb:hover {
-  transform: scale(1.2);
-}
-
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
@@ -690,14 +599,10 @@ input[type=range]::-webkit-slider-thumb:hover {
   border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: 12px;
   padding: 14px;
-  min-width: 0;
-  word-break: break-word;
-  overflow-wrap: anywhere;
 }
 .m-box span { color: var(--mut); font-size: 0.72rem; text-transform: uppercase; font-weight: 700; display: block; }
-.m-box b { font-size: 1.25rem; font-weight: 800; margin-top: 4px; display: block; word-break: break-word; overflow-wrap: anywhere; line-height: 1.25; }
+.m-box b { font-size: 1.25rem; font-weight: 800; margin-top: 4px; display: block; }
 
-/* Segmented Tick-Mark Radial Arc Gauge */
 .gauge-card {
   display: flex;
   flex-direction: column;
@@ -717,88 +622,21 @@ input[type=range]::-webkit-slider-thumb:hover {
   transition: stroke 0.4s ease;
   filter: drop-shadow(0 0 6px currentColor);
 }
-#mask-arc {
-  stroke-dasharray: 119.38;
-  stroke-dashoffset: 119.38;
-  transition: stroke-dashoffset 0.4s ease;
-}
-.gauge-value {
-  position: absolute;
-  bottom: 0px;
-  width: 100%;
-  text-align: center;
-}
+#mask-arc { stroke-dasharray: 119.38; stroke-dashoffset: 119.38; transition: stroke-dashoffset 0.4s ease; }
+.gauge-value { position: absolute; bottom: 0px; width: 100%; text-align: center; }
 .gauge-value b { font-size: 2.2rem; font-weight: 900; display: block; line-height: 1; }
 .gauge-value span { color: var(--mut); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px; font-weight: 700; }
 
-.entity-title {
-  font-size: 1.3rem;
-  font-weight: 800;
-  margin: 14px 0 4px 0;
-  transition: color 0.3s ease;
-}
+.entity-title { font-size: 1.3rem; font-weight: 800; margin: 14px 0 4px 0; transition: color 0.3s ease; }
 
-/* Exorcism Panel */
-.exorcism-panel {
-  margin-top: 20px;
-  grid-column: 1 / -1;
-  border: 1px solid rgba(255,255,255,0.08);
-}
-.witch-wrapper {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-.witch-sprite {
-  font-size: 2.2rem;
-  animation: floatWitch 2.5s ease-in-out infinite alternate;
-  filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.6));
-}
-@keyframes floatWitch {
-  0% { transform: translateY(0px) rotate(-3deg); }
-  50% { transform: translateY(-8px) rotate(3deg); }
-  100% { transform: translateY(0px) rotate(-3deg); }
-}
-.ritual-pulse {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #a855f7;
-  box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.7);
-  animation: pulse 1.5s infinite;
-  margin-right: 6px;
-}
-@keyframes pulse {
-  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.7); }
-  70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(168, 85, 247, 0); }
-  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(168, 85, 247, 0); }
-}
+.exorcism-panel { margin-top: 20px; grid-column: 1 / -1; border: 1px solid rgba(255,255,255,0.08); }
+.witch-wrapper { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+.witch-sprite { font-size: 2.2rem; animation: floatWitch 2.5s ease-in-out infinite alternate; filter: drop-shadow(0 0 10px rgba(168, 85, 247, 0.6)); }
+@keyframes floatWitch { 0% { transform: translateY(0px) rotate(-3deg); } 50% { transform: translateY(-8px) rotate(3deg); } 100% { transform: translateY(0px) rotate(-3deg); } }
 
-.log-text {
-  font-family: Georgia, serif;
-  font-style: italic;
-  font-weight: 400;
-  line-height: 1.6;
-  font-size: 1rem;
-  color: #cbd5e1;
-  background: rgba(0, 0, 0, 0.25);
-  border-left: 3px solid var(--purple);
-  padding: 14px 18px;
-  border-radius: 0 10px 10px 0;
-  margin: 8px 0;
-}
-.meta-info {
-  display: flex;
-  justify-content: space-between;
-  color: var(--mut);
-  font-size: 0.78rem;
-  font-weight: 600;
-  margin-top: 10px;
-}
+.log-text { font-family: Georgia, serif; font-style: italic; font-weight: 400; line-height: 1.6; font-size: 1rem; color: #cbd5e1; background: rgba(0, 0, 0, 0.25); border-left: 3px solid var(--purple); padding: 14px 18px; border-radius: 0 10px 10px 0; margin: 8px 0; }
+.meta-info { display: flex; justify-content: space-between; color: var(--mut); font-size: 0.78rem; font-weight: 600; margin-top: 10px; }
 
-/* Dynamic State themes */
 .state-sanctified { border-color: rgba(16, 185, 129, 0.3) !important; }
 .state-abyssal { border-color: rgba(168, 85, 247, 0.4) !important; animation: abyssalGlow 3s ease-in-out infinite alternate; }
 .state-daemon { border-color: rgba(239, 68, 68, 0.4) !important; animation: daemonFlicker 1.8s ease-in-out infinite alternate; }
@@ -819,11 +657,10 @@ input[type=range]::-webkit-slider-thumb:hover {
 .vs-base{background:repeating-linear-gradient(135deg,rgba(255,255,255,.3) 0 2px,transparent 2px 6px);border:1px solid rgba(255,255,255,.18)}
 .vs-bar{background:linear-gradient(180deg,#c1f2e5,#4fd1b5);box-shadow:0 0 14px rgba(124,224,203,.35)}
 .vs.hot .vs-bar{background:linear-gradient(180deg,#fca5a5,#ef4444);box-shadow:0 0 16px rgba(239,68,68,.55)}
-.vs:focus-visible .vs-track{outline:2px solid var(--accent-blue);border-radius:8px}
+
 body::after{content:"";position:fixed;inset:0;pointer-events:none;opacity:0;transition:opacity .6s;box-shadow:inset 0 0 160px 40px rgba(239,68,68,.5)}
 body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
 @keyframes vig{from{opacity:.35}to{opacity:1}}
-.busy .gauge-value b{opacity:.35}
 
 .hist{display:flex;align-items:flex-end;gap:6px;height:90px}
 .hb{flex:1;border-radius:4px 4px 2px 2px;transition:height .3s}
@@ -833,10 +670,10 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
 .lr{display:flex;justify-content:space-between;gap:10px}.lr span{color:var(--mut);font-size:.85rem;text-transform:none}
 .lr b{font-weight:800;text-align:right}
 .li{padding:10px 12px;margin-bottom:6px;background:rgba(124,224,203,0.08);border:1px solid rgba(124,224,203,0.2);border-radius:8px;color:#f3f4f6;font-weight:700}
-.ghost{position:fixed;bottom:-10%;z-index:0;pointer-events:none;opacity:var(--gop,.07);animation:drift var(--spd,40s) linear infinite}
+.ghost{position:fixed;bottom:-10%;z-index:0;pointer-events:none;opacity:var(--gop,.12);animation:drift var(--spd,30s) linear infinite}
 @keyframes drift{from{transform:translate(0,0) rotate(-6deg)}50%{transform:translate(30px,-60vh) rotate(6deg)}to{transform:translate(-20px,-120vh) rotate(-6deg)}}
-@media (prefers-reduced-motion:reduce){.ghost{display:none}}
-.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0}
+
+.tools{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
 .tools button{background:rgba(255,255,255,.06);color:inherit;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:8px 12px;cursor:pointer;font:inherit;font-size:.8rem}
 .tools .small{color:var(--mut);font-size:.8rem}
 .chat{display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;margin-bottom:10px}
@@ -861,17 +698,21 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
 
 <div class="card controls">
   <div id="btns"></div>
-  <div class="tools"><button id="cal-btn" onclick="calibrate()">🎯 Learn my machine</button><button id="al-btn" onclick="toggleAlerts()">🔔 Alerts: off</button><button onclick="report()">📸 Haunting report</button><span id="tool-note" class="small"></span></div>
+  <div class="tools">
+    <button id="cal-btn" onclick="calibrate()">🎯 Learn my machine</button>
+    <button id="al-btn" onclick="toggleAlerts()">🔔 Alerts: off</button>
+    <button onclick="report()">📸 Haunting report</button>
+    <span id="tool-note" class="small"></span>
+  </div>
 </div>
 
 <div class="card" id="sl" style="display:none; margin-bottom: 20px;">
-  <div class="vs-head"><span>MANUAL SEANCE · hatched = calm baseline · solid = your setting · drag or use arrow keys</span>
+  <div class="vs-head"><span>MANUAL SEANCE · drag bars or use arrow keys</span>
   <button id="exo" onclick="exorcise()">🕯️ Perform exorcism</button></div>
   <div class="vs-row" id="vs-row"></div>
 </div>
 
 <div class="grid">
-  <!-- Left Side: System Telemetry -->
   <div class="card">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
       <span style="color:var(--mut); font-weight:700; font-size:0.78rem; letter-spacing:1px;">SYSTEM TELEMETRY MATRIX</span>
@@ -880,45 +721,29 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
     <div class="metrics-grid" id="m"></div>
   </div>
 
-  <!-- Right Side: Segmented Tick-Mark Radial Arc Gauge -->
   <div class="card gauge-card" id="entity-card">
     <div class="gauge-container">
       <svg class="gauge-svg" viewBox="0 0 100 55">
-        <defs>
-          <mask id="gauge-mask">
-            <path id="mask-arc" d="M 12 48 A 38 38 0 0 1 88 48" stroke="white" stroke-width="12" stroke-dasharray="119.38" stroke-dashoffset="119.38" fill="none" stroke-linecap="butt"/>
-          </mask>
-        </defs>
+        <defs><mask id="gauge-mask"><path id="mask-arc" d="M 12 48 A 38 38 0 0 1 88 48" stroke="white" stroke-width="12" stroke-dasharray="119.38" stroke-dashoffset="119.38" fill="none" stroke-linecap="butt"/></mask></defs>
         <path class="gauge-bg" d="M 12 48 A 38 38 0 0 1 88 48"></path>
         <path id="gauge-arc" class="gauge-fill" d="M 12 48 A 38 38 0 0 1 88 48" mask="url(#gauge-mask)"></path>
       </svg>
-      <div class="gauge-value">
-        <b id="pct">0%</b>
-        <span>POSSESSION</span>
-      </div>
+      <div class="gauge-value"><b id="pct">0%</b><span>POSSESSION</span></div>
     </div>
     <div class="entity-title" id="ent">Sanctified Core</div>
     <div style="color:var(--mut); font-size:0.8rem;" id="entity-desc">System behaving within limits</div>
   </div>
 
-  <!-- Bottom Full-Width: Witch & Exorcism Log -->
   <div class="card exorcism-panel" id="exorcism-card">
     <div class="witch-wrapper">
       <div class="witch-sprite" id="witch-icon">🧙‍♀️</div>
       <div>
-        <div style="font-weight:800; font-size:0.95rem; display:flex; align-items:center;">
-          <span class="ritual-pulse"></span> EXORCISM DIAGNOSTIC LOG
-        </div>
-        <div style="color:var(--mut); font-size:0.78rem;">Live ghost-hunter report</div>
+        <div style="font-weight:800; font-size:0.95rem;">EXORCISM DIAGNOSTIC LOG</div>
+        <div style="color:var(--mut); font-size:0.78rem;">Live AI Remediation Report</div>
       </div>
     </div>
-
-    <div class="log-text" id="log">Scanning for demons...</div>
-
-    <div class="meta-info">
-      <span id="by">classified by TabPFN · narrated by gemma3:4b</span>
-      <span id="demo-tag"></span>
-    </div>
+    <div class="log-text" id="log">Scanning for ghosts...</div>
+    <div class="meta-info"><span id="by">classified by TabPFN</span><span id="demo-tag"></span></div>
   </div>
 </div>
 
@@ -926,6 +751,7 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
   <div class="vs-head"><span>SEANCE HISTORY · last 20 readings · hatched = calm</span></div>
   <div class="hist" id="hist"></div>
 </div>
+
 <div class="info-row">
   <div class="card"><div class="vs-head"><span>TOP SUSPECTS</span></div><div id="suspects"></div></div>
   <div class="card"><div class="vs-head"><span>SESSION STATS</span></div><div id="stats"></div></div>
@@ -933,7 +759,7 @@ body.haunted::after{animation:vig 1.6s ease-in-out infinite alternate}
 </div>
 
 <div class="card" style="margin-top:20px">
-  <div class="vs-head"><span>💬 ASK THE GHOST · local Gemma / Cloud AI</span>
+  <div class="vs-head"><span>💬 ASK THE GHOST · Cloud AI Remediation</span>
     <span><select id="model-sel" style="display:none"></select> <button id="story-btn" onclick="tellStory()">📖 Tell my session's ghost story</button></span></div>
   <div id="chat" class="chat"></div>
   <div class="chips" id="chips"></div>
@@ -948,8 +774,7 @@ const $ = id => document.getElementById(id);
 
 function btn(t, fn, id) {
   const b = document.createElement("button");
-  b.textContent = t;
-  b.id = id;
+  b.textContent = t; b.id = id;
   b.onclick = () => {
     fn();
     $("sl").style.display = mode === "manual" ? "block" : "none";
@@ -985,7 +810,6 @@ function buildSliders() {
   Object.keys(SL).forEach(k => {
     const s = SL[k], el = document.createElement("div");
     el.className = "vs"; el.id = "vs-" + k; el.tabIndex = 0;
-    el.setAttribute("role", "slider"); el.setAttribute("aria-label", s.label);
     el.innerHTML = `<b id="vv-${k}"></b><div class="vs-track"><div class="vs-base" style="height:${pb(k)}%"></div><div class="vs-bar" id="vb-${k}"></div></div><span>${s.label}</span>`;
     $("vs-row").appendChild(el);
     const tr = el.querySelector(".vs-track");
@@ -998,12 +822,6 @@ function buildSliders() {
     tr.addEventListener("pointerdown", e => { tr.setPointerCapture(e.pointerId); tr.drag = true; set(e.clientY); });
     tr.addEventListener("pointermove", e => { if (tr.drag) set(e.clientY); });
     tr.addEventListener("pointerup", () => { tr.drag = false; clearTimeout(deb); tick(); });
-    el.addEventListener("keydown", e => {
-      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-      e.preventDefault();
-      s.val = Math.max(s.min, Math.min(s.max, s.val + (e.key === "ArrowUp" ? 1 : -1) * s.step * (e.shiftKey ? 5 : 1)));
-      paint(k); soon();
-    });
     paint(k);
   });
 }
@@ -1012,45 +830,38 @@ function exorcise() { Object.keys(SL).forEach(k => { SL[k].val = SL[k].base; pai
 const SIG = {"Sanctified Core": "🕯️", "Abyssal Heap": "🕳️", "Clockwork Daemon": "⚙️", "Infernal Crucible": "🌋"};
 const gem = {};
 let ctl, tw;
+
 async function tick() {
   if (ctl) ctl.abort();
   ctl = new AbortController();
   $("entity-card").classList.add("busy");
   const q = new URLSearchParams({mode, scenario: sc, cpu: SL.cpu.val, ram: SL.ram.val, swap: SL.swap.val, ram_delta: SL.delta.val, top: SL.top.val});
-  try {
-    render(await (await fetch("/api/reading?" + q, {signal: ctl.signal})).json());
-  } catch (e) {
-    if (e.name !== "AbortError") $("log").textContent = "The spirits are unreachable...";
-  }
+  try { render(await (await fetch("/api/reading?" + q, {signal: ctl.signal})).json()); } catch (e) {}
 }
+
 function render(d) {
   const r = d.reading;
   $("entity-card").classList.remove("busy");
   $("m").innerHTML = [
-    ["CPU Usage", r.cpu.toFixed(0) + "%"],
-    ["RAM Usage", r.ram.toFixed(0) + "%"],
-    ["Swap Pressure", r.swap.toFixed(0) + "%"],
-    ["RAM Growth Rate", (r.ram_delta > 0 ? "+" : "") + r.ram_delta.toFixed(1) + "%"],
-    ["Active Processes", r.proc_count + " running"],
-    ["System Temperature", r.temp.toFixed(0) + "°C"],
-    ["Top Process CPU", r.top_proc_cpu.toFixed(0) + "% (" + r.top_proc + ")"]
+    ["CPU Usage", r.cpu.toFixed(0) + "%"], ["RAM Usage", r.ram.toFixed(0) + "%"],
+    ["Swap Pressure", r.swap.toFixed(0) + "%"], ["RAM Growth Rate", (r.ram_delta > 0 ? "+" : "") + r.ram_delta.toFixed(1) + "%"],
+    ["Active Processes", r.proc_count + " running"], ["Top Process CPU", r.top_proc_cpu.toFixed(0) + "% (" + r.top_proc + ")"]
   ].map(x => `<div class="m-box"><span>${x[0]}</span><b>${x[1]}</b></div>`).join("");
 
   $("ent").textContent = SIG[d.entity] + " " + d.entity;
   $("pct").textContent = d.possession + "%";
   $("mask-arc").style.strokeDashoffset = 119.38 - 119.38 * (d.possession / 100);
   document.body.classList.toggle("haunted", d.possession > 70);
-  $("mascot").textContent = d.possession < 10 ? "😇" : d.possession < 40 ? "👻" : d.possession < 75 ? "😱" : "💀";
 
-  let color = "var(--ok)", st = "state-sanctified", witch = "🧙‍♀️", desc = "Silicon is pure & quiet";
-  if (d.entity === "Abyssal Heap") { color = "var(--purple)"; st = "state-abyssal"; witch = "🔮"; desc = "Un-freed memory leak thrashing swap"; }
-  else if (d.entity === "Clockwork Daemon") { color = "var(--bad)"; st = "state-daemon"; witch = "⚡"; desc = "Process locked at 100% CPU"; }
-  else if (d.entity === "Infernal Crucible") { color = "var(--warn)"; st = "state-infernal"; witch = "🔥"; desc = "Thermal overload under stress"; }
+  let color = "var(--ok)", witch = "🧙‍♀️", desc = "Silicon is pure & quiet";
+  if (d.entity === "Abyssal Heap") { color = "var(--purple)"; witch = "🔮"; desc = "Un-freed memory leak thrashing swap"; }
+  else if (d.entity === "Clockwork Daemon") { color = "var(--bad)"; witch = "⚡"; desc = "Process locked at 100% CPU"; }
+  else if (d.entity === "Infernal Crucible") { color = "var(--warn)"; witch = "🔥"; desc = "Thermal overload under stress"; }
+
   $("gauge-arc").style.stroke = color;
   $("ent").style.color = color;
   $("witch-icon").textContent = witch;
   $("entity-desc").textContent = desc;
-  $("exorcism-card").className = "card exorcism-panel " + st;
 
   const speed = d.ms ? d.ms + " ms" : "cached";
   const g = gem[d.entity];
@@ -1061,28 +872,26 @@ function render(d) {
     renderRitual(g.ritual);
   } else {
     $("log").textContent = d.log;
-    $("by").textContent = `classified by ${d.classifier} (${speed}) · pre-written text` + (d.gemma ? ` · ${d.model} is writing...` : "");
+    $("by").textContent = `classified by ${d.classifier} (${speed}) · ` + (d.gemma ? `${d.model} generating AI fix...` : "pre-written");
     renderRitual(d.ritual);
   }
   $("model-badge").textContent = d.classifier;
-  $("demo-tag").textContent = d.demo ? "DEMO MODE ACTIVE" : "";
-  document.body.style.setProperty("--spd", (40 - 32 * d.possession / 100) + "s");
-  document.body.style.setProperty("--gop", 0.07 + 0.15 * d.possession / 100);
+  document.body.style.setProperty("--spd", (30 - 20 * d.possession / 100) + "s");
+  document.body.style.setProperty("--gop", 0.12 + 0.25 * d.possession / 100);
   extras(d);
-  checkAlert(d);
   if (d.gemma && (!g || Date.now() - g.t > 60000)) askGemma(d);
 }
 
-function renderRitual(ritualSteps) {
-  if (!ritualSteps || !ritualSteps.length) return;
-  $("ritual").innerHTML = ritualSteps.map((t, i) => `<div class="li">${i + 1}. ${esc(t)}</div>`).join("");
+function renderRitual(steps) {
+  if (!steps || !steps.length) return;
+  $("ritual").innerHTML = steps.map((t, i) => `<div class="li">${i + 1}. ${esc(t)}</div>`).join("");
 }
 
 async function askGemma(d) {
   const r = d.reading, q = new URLSearchParams({label: d.entity, cpu: r.cpu, ram: r.ram, swap: r.swap, ram_delta: r.ram_delta, top: r.top_proc_cpu, proc: r.top_proc});
   try {
     const n = await (await fetch("/api/narrate?" + q)).json();
-    if (n.by === d.model) gem[d.entity] = {text: n.text, ritual: n.ritual, by: n.by, secs: n.secs, t: Date.now()};
+    gem[d.entity] = {text: n.text, ritual: n.ritual, by: n.by, secs: n.secs, t: Date.now()};
     if ($("ent").textContent.indexOf(d.entity) < 0) return;
     const el = $("log"); clearInterval(tw); let i = 0;
     tw = setInterval(() => { el.textContent = n.text.slice(0, ++i); if (i >= n.text.length) clearInterval(tw); }, 14);
@@ -1095,6 +904,7 @@ const esc = t => String(t).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", 
 const row = (a, b) => `<div class="lr"><span>${esc(a)}</span><b>${esc(b)}</b></div>`;
 const COL = {"Sanctified Core": "#10b981", "Abyssal Heap": "#a855f7", "Clockwork Daemon": "#ef4444", "Infernal Crucible": "#f59e0b"};
 const HIST = [], S = {n: 0, bad: 0, peak: 0, c: {}};
+
 function extras(d) {
   HIST.push({p: d.possession, e: d.entity}); if (HIST.length > 20) HIST.shift();
   S.n++; if (d.possession > 50) S.bad++; S.peak = Math.max(S.peak, d.possession); S.c[d.entity] = (S.c[d.entity] || 0) + 1;
@@ -1104,69 +914,51 @@ function extras(d) {
   const sp = [...(d.reading.suspects || [])];
   if (d.entity === "Abyssal Heap") sp.sort((a, b) => (b.mem || 0) - (a.mem || 0));
   $("suspects").innerHTML = sp.map((x, i) => row((i === 0 && d.entity !== "Sanctified Core" ? "🎯 " : (i + 1) + ". ") + x.name + (x.ghost ? " → " + x.ghost : ""),
-    x.cpu + "% CPU" + (x.mem ? " · " + x.mem + " MB" : "") + (x.conns != null ? " · 📡 " + x.conns + (x.conns >= 40 ? " ⚠️" : "") : ""))).join("");
+    x.cpu + "% CPU" + (x.mem ? " · " + x.mem + " MB" : ""))).join("");
 }
+
 function buildGhosts() {
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 8; i++) {
     const g = document.createElement("div");
     g.className = "ghost"; g.textContent = "👻";
-    g.style.left = (Math.random() * 92) + "%"; g.style.fontSize = (1.6 + Math.random() * 2) + "rem";
-    g.style.animationDelay = "-" + (Math.random() * 40) + "s";
+    g.style.left = (Math.random() * 92) + "%"; g.style.fontSize = (1.8 + Math.random() * 2) + "rem";
+    g.style.animationDelay = "-" + (Math.random() * 30) + "s";
     $("ghosts").appendChild(g);
   }
 }
+
 async function calibrate() {
   if (mode !== "live") $("b-live").click();
-  $("tool-note").textContent = "Use your PC normally for about 40 seconds...";
-  try { await fetch("/api/calibrate?seconds=40", {method: "POST"}); } catch (e) { return; }
-  const poll = setInterval(async () => {
-    try {
-      const st = await (await fetch("/api/calibrate")).json();
-      $("tool-note").textContent = st.state === "collecting" ? `Learning your machine... ${st.n}/${st.total}` : st.state === "training" ? "Teaching the model..." : "Done! Baseline saved to calibration.csv";
-      if (st.state === "done" || st.state === "idle") { clearInterval(poll); setTimeout(() => $("tool-note").textContent = "", 6000); tick(); }
-    } catch (e) { clearInterval(poll); }
-  }, 1500);
+  $("tool-note").textContent = "Learning machine baseline...";
+  try { await fetch("/api/calibrate?seconds=40", {method: "POST"}); } catch (e) {}
 }
-let alertsOn = false, hotSince = 0;
+
+let alertsOn = false;
 async function toggleAlerts() {
-  if (!alertsOn && "Notification" in window && Notification.permission === "default") await Notification.requestPermission();
   alertsOn = !alertsOn;
   $("al-btn").textContent = "🔔 Alerts: " + (alertsOn ? "on" : "off");
 }
-function checkAlert(d) {
-  if (!alertsOn || mode !== "live") return;
-  if (d.possession < 80) { hotSince = 0; return; }
-  hotSince = hotSince || Date.now();
-  if (Date.now() - hotSince > 30000) {
-    hotSince = Date.now() + 300000;
-    if ("Notification" in window && Notification.permission === "granted") new Notification("👻 Haunted Hardware", {body: d.entity + " at " + d.possession + "%: a demon has taken over your machine!"});
-    fetch("/api/alert?" + new URLSearchParams({entity: d.entity, possession: d.possession}), {method: "POST"});
-  }
-}
+
 function report() {
   const c = document.createElement("canvas"); c.width = 1080; c.height = 1080;
   const x = c.getContext("2d"), g = x.createLinearGradient(0, 0, 0, 1080);
   g.addColorStop(0, "#0f0a1f"); g.addColorStop(1, "#1a0f2e"); x.fillStyle = g; x.fillRect(0, 0, 1080, 1080);
   x.textAlign = "center"; x.fillStyle = "#fff"; x.font = "800 64px sans-serif"; x.fillText("HAUNTED HARDWARE", 540, 120);
-  x.font = "160px sans-serif"; x.fillText(S.peak > 75 ? "💀" : S.peak > 40 ? "😱" : S.peak > 10 ? "👻" : "😇", 540, 320);
+  x.font = "160px sans-serif"; x.fillText(S.peak > 75 ? "💀" : S.peak > 40 ? "😱" : "👻", 540, 320);
   const top = Object.keys(S.c).sort((a, b) => S.c[b] - S.c[a])[0] || "Sanctified Core";
   x.font = "700 52px sans-serif"; x.fillStyle = COL[top]; x.fillText(SIG[top] + " " + top, 540, 420);
   x.fillStyle = "#cbd5e1"; x.font = "36px sans-serif";
   x.fillText("Peak possession: " + S.peak + "%", 540, 520);
-  x.fillText("Haunted " + (S.n ? Math.round(100 * S.bad / S.n) : 0) + "% of " + S.n + " readings", 540, 580);
-  HIST.forEach((h, i) => { const w = 36, gap = 14, hh = Math.max(h.p, 4) * 2.2; x.fillStyle = COL[h.e]; x.fillRect(540 - HIST.length * (w + gap) / 2 + i * (w + gap), 880 - hh, w, hh); });
-  x.fillStyle = "#94a3b8"; x.font = "28px sans-serif"; x.fillText("Seance history", 540, 930);
-  x.fillText("TabPFN reads the vitals, Gemma casts out the demon", 540, 1000);
   const a = document.createElement("a"); a.download = "haunting-report.png"; a.href = c.toDataURL("image/png"); a.click();
 }
-if (DEMO) $("cal-btn").style.display = "none";
-let busy = false, curModel = "";
+
+let busy = false;
 function addMsg(cls, text) {
   const m = document.createElement("div"); m.className = "msg " + cls; m.textContent = text;
   $("chat").appendChild(m); $("chat").scrollTop = $("chat").scrollHeight; return m;
 }
+
 async function streamInto(url, el) {
-  const t0 = performance.now();
   try {
     const rd = (await fetch(url)).body.getReader(), dec = new TextDecoder();
     for (;;) {
@@ -1174,8 +966,8 @@ async function streamInto(url, el) {
       el.textContent += dec.decode(value, {stream: true}); $("chat").scrollTop = $("chat").scrollHeight;
     }
   } catch (e) { el.textContent = "(The ghost went silent.)"; }
-  el.textContent += "  [" + ((performance.now() - t0) / 1000).toFixed(1) + "s" + (curModel ? " · " + curModel : "") + "]";
 }
+
 async function ask(text) {
   const q = (typeof text === "string" ? text : $("q").value).trim();
   if (!q || busy) return;
@@ -1183,28 +975,18 @@ async function ask(text) {
   await streamInto("/api/ask?" + new URLSearchParams({q}), addMsg("gh", ""));
   busy = false;
 }
+
 async function tellStory() {
   if (busy) return;
   busy = true; addMsg("me", "📖 Tell the story of my session");
   await streamInto("/api/story?" + new URLSearchParams({peak: S.peak, n: S.n, bad: S.bad, ghosts: HIST.map(h => h.e).join(",")}), addMsg("gh", ""));
   busy = false;
 }
+
 ["Why is my PC slow?", "Who is the culprit?", "Is this dangerous?", "What should I do first?"].forEach(t => {
   const b = document.createElement("button"); b.textContent = t; b.onclick = () => ask(t); $("chips").appendChild(b);
 });
-(async () => {
-  try {
-    const m = await (await fetch("/api/models")).json(); curModel = m.current;
-    if (m.models.length > 1) {
-      const sel = $("model-sel");
-      sel.innerHTML = m.models.map(n => `<option ${n === m.current ? "selected" : ""}>${esc(n)}</option>`).join(""); sel.style.display = "";
-      sel.onchange = async () => {
-        await fetch("/api/model?" + new URLSearchParams({name: sel.value}), {method: "POST"});
-        curModel = sel.value; Object.keys(gem).forEach(k => delete gem[k]); tick();
-      };
-    }
-  } catch (e) {}
-})();
+
 buildGhosts();
 buildSliders();
 if (DEMO) $("b0").click(); else $("b-live").click();
