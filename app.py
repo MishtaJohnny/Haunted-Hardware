@@ -337,7 +337,8 @@ def _stream_cloud(prompt, temperature=0.8):
             yield "(Error: No GEMINI_API_KEY found in environment)"
             return
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?alt=sse&key={key}"
+            # Updated model string to gemini-2.0-flash
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature}
@@ -440,7 +441,8 @@ def query_google_ai_studio(prompt):
     key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
     if not key:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+    # Updated model string to gemini-2.0-flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
@@ -457,6 +459,45 @@ def query_google_ai_studio(prompt):
     except Exception as e:
         print("Google AI Studio Exception:", e)
     return None
+
+
+def _stream_cloud(prompt, temperature=0.8):
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
+    def gen():
+        if not key:
+            yield "(Error: No GEMINI_API_KEY found in environment)"
+            return
+        try:
+            # Updated model string to gemini-2.0-flash
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": temperature}
+            }
+            with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+                if resp.status_code != 200:
+                    yield f"(API Error {resp.status_code}: {resp.text[:150]})"
+                    return
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    line_str = line.decode("utf-8") if isinstance(line, bytes) else line
+                    if line_str.startswith("data: "):
+                        data_json = line_str[6:].strip()
+                        if data_json == "[DONE]":
+                            break
+                        try:
+                            j = json.loads(data_json)
+                            candidates = j.get("candidates", [])
+                            if candidates:
+                                parts = candidates[0].get("content", {}).get("parts", [])
+                                for p in parts:
+                                    yield p.get("text", "")
+                        except Exception:
+                            pass
+        except Exception as e:
+            yield f"(Cloud AI stream error: {e})"
+    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 
 
 @app.get("/api/narrate")
