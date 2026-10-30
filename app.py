@@ -376,13 +376,20 @@ def _context():
 def _stream_cloud(prompt, temperature=0.8):
     def gen():
         try:
-            # UPDATED: Explicitly using gemma-3-4b-it
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": temperature}
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://render.com",
+                "X-Title": "Haunted Hardware"
             }
-            with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
+            payload = {
+                "model": "google/gemma-3-4b-it",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "stream": True
+            }
+            with requests.post(url, json=payload, headers=headers, stream=True, timeout=30) as resp:
                 if resp.status_code != 200:
                     yield f"(Cloud AI error {resp.status_code}: {resp.text[:300]})"
                     return
@@ -408,13 +415,12 @@ def _stream_cloud(prompt, temperature=0.8):
                             yield f"(Cloud AI error: {j['error'].get('message', 'Unknown error')})"
                             break
                             
-                        candidates = j.get("candidates", [])
-                        if candidates:
-                            parts = candidates[0].get("content", {}).get("parts", [])
-                            for p in parts:
-                                text = p.get("text", "")
-                                if text:
-                                    yield text
+                        choices = j.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            text = delta.get("content", "")
+                            if text:
+                                yield text
                         else:
                             yield "(Empty response from Cloud AI)"
                     except Exception as e:
@@ -424,51 +430,30 @@ def _stream_cloud(prompt, temperature=0.8):
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 
 def query_google_ai_studio(prompt):
-    if not GEMINI_API_KEY:
+    if not os.getenv("OPENROUTER_API_KEY"):
         return None
-    # UPDATED: Using streaming endpoint for gemma-3-4b-it since generateContent is blocked for it
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://render.com",
+        "X-Title": "Haunted Hardware"
+    }
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7}
+        "model": "google/gemma-3-4b-it",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "response_format": {"type": "json_object"}
     }
     try:
-        full_text = ""
-        with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
-            if resp.status_code != 200:
-                print(f"Google API Error: {resp.status_code} {resp.text}")
-                return None
-                
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                line_str = line.decode("utf-8") if isinstance(line, bytes) else line
-                
-                if line_str.startswith("data: "):
-                    data_json = line_str[6:].strip()
-                elif line_str.startswith("data:"):
-                    data_json = line_str[5:].strip()
-                else:
-                    continue
-                    
-                if data_json == "[DONE]":
-                    break
-                    
-                try:
-                    j = json.loads(data_json)
-                    candidates = j.get("candidates", [])
-                    if candidates:
-                        for p in candidates[0].get("content", {}).get("parts", []):
-                            full_text += p.get("text", "")
-                except Exception:
-                    pass
-        
-        if full_text:
-            match = re.search(r"\{.*\}", full_text, re.DOTALL)
+        res = requests.post(url, json=payload, headers=headers, timeout=12)
+        if res.status_code == 200:
+            raw_text = res.json()["choices"][0]["message"]["content"]
+            match = re.search(r"\{.*\}", raw_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
     except Exception as e:
-        print("Google AI Studio Stream Error:", e)
+        print("OpenRouter API Error: ", e)
     return None
 
 
