@@ -331,20 +331,22 @@ def _context():
 
 
 def _stream_cloud(prompt, temperature=0.8):
-    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
+    key = get_gemini_key()
     def gen():
         if not key:
             yield "(Error: No GEMINI_API_KEY found in environment)"
             return
+        model = get_active_gemini_model()
         try:
-            # Updated model string to gemini-2.0-flash
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key={key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature}
             }
             with requests.post(url, json=payload, headers={"Content-Type": "application/json"}, stream=True, timeout=30) as resp:
                 if resp.status_code != 200:
+                    global _cached_gemini_model
+                    _cached_gemini_model = None
                     yield f"(API Error {resp.status_code}: {resp.text[:150]})"
                     return
                 for line in resp.iter_lines():
@@ -437,12 +439,37 @@ def set_model(name: str):
         _gemma.clear()
     return dict(current=MODEL)
 
+_cached_gemini_model = None
+
+def get_active_gemini_model():
+    global _cached_gemini_model
+    if _cached_gemini_model:
+        return _cached_gemini_model
+    key = get_gemini_key()
+    if not key:
+        return "gemini-2.5-flash"
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            for m in res.json().get("models", []):
+                name = m.get("name", "").replace("models/", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods and "flash" in name:
+                    _cached_gemini_model = name
+                    return _cached_gemini_model
+    except Exception:
+        pass
+    _cached_gemini_model = "gemini-2.5-flash"
+    return _cached_gemini_model
+
+
 def query_google_ai_studio(prompt):
-    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip("'\"")
+    key = get_gemini_key()
     if not key:
         return None
-    # Updated model string to gemini-2.0-flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}"
+    model = get_active_gemini_model()
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
@@ -454,8 +481,9 @@ def query_google_ai_studio(prompt):
             match = re.search(r"\{.*\}", raw_text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
-        else:
-            print(f"Google AI Studio Error ({res.status_code}):", res.text)
+        elif res.status_code == 404:
+            global _cached_gemini_model
+            _cached_gemini_model = None
     except Exception as e:
         print("Google AI Studio Exception:", e)
     return None
