@@ -376,8 +376,8 @@ def _context():
 def _stream_cloud(prompt, temperature=0.8):
     def gen():
         try:
-            # UPDATED: Pointing to Gemma 3 4B Instruct on Google AI Studio
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+            # Changed from v1beta to v1
+            url = f"https://generativelanguage.googleapis.com/v1/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": temperature}
@@ -429,8 +429,8 @@ def _stream_cloud(prompt, temperature=0.8):
 def query_google_ai_studio(prompt):
     if not GEMINI_API_KEY:
         return None
-    # UPDATED: Pointing to Gemma 3 4B Instruct
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:generateContent?key={GEMINI_API_KEY}"
+    # Changed from v1beta to v1
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemma-3-4b-it:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"}
