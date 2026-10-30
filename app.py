@@ -376,7 +376,7 @@ def _context():
 def _stream_cloud(prompt, temperature=0.8):
     def gen():
         try:
-            # FIXED: Back to v1beta (not v1)
+            # UPDATED: Explicitly using gemma-3-4b-it
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
@@ -426,7 +426,7 @@ def _stream_cloud(prompt, temperature=0.8):
 def query_google_ai_studio(prompt):
     if not GEMINI_API_KEY:
         return None
-    # FIXED: Using v1beta streaming endpoint
+    # UPDATED: Using streaming endpoint for gemma-3-4b-it since generateContent is blocked for it
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemma-3-4b-it:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -463,7 +463,6 @@ def query_google_ai_studio(prompt):
                 except Exception:
                     pass
         
-        # Parse the accumulated text as JSON
         if full_text:
             match = re.search(r"\{.*\}", full_text, re.DOTALL)
             if match:
